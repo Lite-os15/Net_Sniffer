@@ -1,0 +1,48 @@
+
+# ── Python ──────────────────────────────────────────────────────────────────
+__pycache__/
+*.py[cod]
+*.pyo
+*.pyd
+*.so
+*.egg
+*.egg-info/
+dist/
+build/
+.eggs/
+
+# ── Virtual Environments ─────────────────────────────────────────────────────
+.venv/
+venv/
+env/
+ENV/
+
+# ── PyCharm IDE ──────────────────────────────────────────────────────────────
+.idea/
+*.iml
+*.iws
+*.ipr
+out/
+
+# ── VS Code ──────────────────────────────────────────────────────────────────
+.vscode/
+
+# ── OS Files ─────────────────────────────────────────────────────────────────
+.DS_Store
+Thumbs.db
+desktop.ini
+
+# ── Logs & packet captures ───────────────────────────────────────────────────
+*.log
+*.pcap
+*.pcapng
+*.cap
+
+# ── Secrets / sensitive data ─────────────────────────────────────────────────
+.env
+.env.*
+secrets.py
+config_local.py
+
+# ── Project-specific ─────────────────────────────────────────────────────────
+code_review_report.md

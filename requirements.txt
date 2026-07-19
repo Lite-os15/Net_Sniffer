@@ -1,0 +1,15 @@
+# Python dependencies — install with: pip install -r requirements.txt
+scapy>=2.7.0
+colorama>=0.4.6
+prettytable>=3.18.0
+psutil>=7.2.2
+wcwidth>=0.3.5
+
+# ─────────────────────────────────────────────────────────────────────────────
+# NON-PIP REQUIREMENT (Windows only)
+# ─────────────────────────────────────────────────────────────────────────────
+# Npcap — packet capture driver required by Scapy on Windows.
+# Download and install from: https://npcap.com/#download
+# Run the installer and check "WinPcap API-compatible Mode" during setup.
+# Linux/macOS users do NOT need this (libpcap is built-in).
+# ─────────────────────────────────────────────────────────────────────────────
