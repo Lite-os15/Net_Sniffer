@@ -158,9 +158,6 @@ def _spoof_session(
             spoof(target_ip, target_mac, gateway_ip)
             spoof(gateway_ip, gateway_mac, target_ip)
             packet_count += 1
-            # Print a heartbeat every 5 cycles (10 seconds)
-            if packet_count % 5 == 0:
-                print(f"{Fore.CYAN}[*] ARP spoofing active — {packet_count} packets sent{Style.RESET_ALL}")
             stop_event.wait(2)
     finally:
         print("")
