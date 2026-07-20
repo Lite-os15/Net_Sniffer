@@ -235,9 +235,6 @@ def _spoof_session(
             spoof(target_ip, target_mac, gateway_ip)
             spoof(gateway_ip, gateway_mac, target_ip)
             packet_count += 1
-            # Print a heartbeat every 5 cycles (10 seconds)
-            if packet_count % 5 == 0:
-                print(f"{Fore.CYAN}[*] ARP spoofing active — {packet_count} packets sent{Style.RESET_ALL}")
             stop_event.wait(2)
     except Exception as e:
         _err(f"Error in spoof session thread: {e}")
@@ -425,4 +422,4 @@ def main_arp_spoof(target_ip: str | None = None,
     print(f"     [4] Exit")
     print(f"{'═'*55}{Style.RESET_ALL}\n")
 
-    return True
+    return True
