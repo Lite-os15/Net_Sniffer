@@ -2,7 +2,7 @@
 
 # 🔭 NetworkSniffer
 
-**A Python-based HTTP packet sniffer that captures and inspects live network traffic in real time.**
+**A Python-based MITM network sniffer with ARP spoofing, credential harvesting, and live device scanning.**
 
 ![Python](https://img.shields.io/badge/Python-3.10%2B-blue?logo=python&logoColor=white)
 ![Scapy](https://img.shields.io/badge/Scapy-2.7.0-green?logo=python)
@@ -18,9 +18,12 @@
 
 ## 📖 Overview
 
-NetworkSniffer passively listens on a chosen network interface and surfaces HTTP traffic in a human-readable format. It detects visited URLs, extracts potential login credentials from plaintext POST requests, and can optionally dump raw HTTP headers — all from a clean, color-coded terminal UI.
+NetworkSniffer is a two-module MITM (Man-in-the-Middle) tool that combines **ARP cache poisoning** with **deep packet inspection** to intercept and analyze network traffic on a LAN.
 
-It is designed to be used **after running an ARP Spoofer** so that the machine becomes a man-in-the-middle and can see traffic from other hosts on the LAN. The ARP spoof flow now stays in the background, so the sniffer can be launched immediately after spoofing starts.
+1. **ARP Spoofer** (`arp_spoof.py`) — poisons ARP caches so traffic between a victim and the gateway flows through the attacker machine.
+2. **Packet Sniffer** (`net_sniffer.py`) — captures HTTP traffic, DNS queries, and harvests credentials from multiple protocols.
+
+The ARP spoof runs in a **background thread**, so the sniffer can be started immediately without losing the MITM session.
 
 ---
 
@@ -28,9 +31,6 @@ It is designed to be used **after running an ARP Spoofer** so that the machine b
 
 ```mermaid
 flowchart TB
-    %% ── Title ──
-    TITLE["NetSniffer — ARP Spoofing MITM Tool"]
-
     %% ── User Actions ──
     subgraph User["1. User Input"]
         direction TB
@@ -43,8 +43,8 @@ flowchart TB
     %% ── ARP Spoof Engine ──
     subgraph Spoof["2. ARP Spoof Engine (Background Thread)"]
         direction TB
-        S1["Get MAC: target_ip + gateway_ip"]
-        S2["Enable IP Forwarding<br/>echo 1 > /proc/sys/net/ipv4/ip_forward"]
+        S1["Resolve MACs: victim + gateway"]
+        S2["Enable IP Forwarding<br/>(Linux: /proc  |  Windows: PowerShell/netsh)"]
         S3["Spoof loop every 2s:<br/>Tell Victim → Attacker = Gateway<br/>Tell Gateway → Attacker = Victim"]
         S4["On stop:<br/>Restore ARP tables<br/>Disable IP forwarding"]
     end
@@ -65,51 +65,66 @@ flowchart TB
         I2{"Check Packet Type"}
         I3["📡 DNS Query → Print domain"]
         I4["🌐 HTTP Request → Extract URL"]
-        I5["🔑 HTTP Raw → Search credentials"]
-        I6["📄 Raw Mode → Dump headers + TCP SYN"]
+        I5["🔑 Credential Harvester<br/>Forms | JSON | Basic Auth | Bearer"]
+        I6["🔑 Plaintext Protocols<br/>FTP | SMTP | POP3 | IMAP"]
+        I7["📄 Raw Mode → Dump headers + TCP SYN"]
         I1 --> I2
         I2 -->|"DNS"| I3
         I2 -->|"HTTP"| I4
         I4 --> I5
-        I2 -->|"TCP + raw flag"| I6
+        I2 -->|"TCP Raw"| I6
+        I2 -->|"TCP + raw flag"| I7
     end
 
     %% ── Connections ──
     User --> Spoof
     Spoof --> Flow
     Flow -.->|"Sniff on interface"| Inspect
-
-    %% ── Styling ──
-    classDef title fill:#0d1117,stroke:#58a6ff,stroke-width:2px,color:#58a6ff;
-    classDef user fill:#0d1117,stroke:#d2a8ff,stroke-width:1px,color:#c9d1d9;
-    classDef spoof fill:#0d1117,stroke:#ff7b72,stroke-width:1px,color:#c9d1d9;
-    classDef flow fill:#0d1117,stroke:#7ee787,stroke-width:1px,color:#c9d1d9;
-    classDef inspect fill:#0d1117,stroke:#79c0ff,stroke-width:1px,color:#c9d1d9;
-    class TITLE title;
 ```
 
 ---
 
 ## ✨ Features
 
-| Feature                     | Description                                                                |
-| --------------------------- | -------------------------------------------------------------------------- |
-| 🌐 **Live HTTP Sniffing**   | Captures all HTTP traffic on a chosen interface in real time               |
-| 🔑 **Credential Detection** | Scans POST body for keywords like `username`, `password`, `email`, `login` |
-| 🗺️ **URL Extraction**       | Prints source IP, HTTP method, host and request path for every request     |
-| 📋 **Raw Packet Dump**      | Optional full HTTP header dump for deep inspection                         |
-| 🖥️ **Interface Table**      | Auto-detects and displays all network interfaces with MAC and IP           |
-| 🎨 **Color-coded Output**   | Uses Colorama for clear, readable terminal output                          |
-| 🔁 **Cross-platform**       | Works on Linux, macOS, and Windows (with Npcap)                            |
-| 🔍 **Built-in Live Scan**   | Starts a real-time ARP-based network device scanner when ARP spoofing runs |
+| Feature | Description |
+|---------|-------------|
+| 🕵️ **ARP Spoofing (MITM)** | Two-way ARP cache poisoning runs in background — victim + gateway both spoofed |
+| 🌐 **Live HTTP Sniffing** | Captures HTTP requests in real time with source IP, method, host, and path |
+| 📡 **DNS Query Logging** | Logs domains visited by the victim (works even for HTTPS — DNS is usually plaintext) |
+| 🔑 **Credential Harvesting** | Structured extraction from HTTP form POST, JSON APIs, HTTP Basic/Bearer auth headers |
+| 📧 **Plaintext Protocol Creds** | Detects credentials from FTP (port 21), SMTP (25/587), POP3 (110), IMAP (143) |
+| 🔄 **Network Rescan** | Type `R` during device selection to rescan the network without restarting the flow |
+| 📋 **Raw Packet Dump** | Optional full HTTP header dump + TCP SYN connection logging |
+| 🖥️ **Interface Selector** | Numbered list of all NICs with MAC and IP for easy selection |
+| 🔀 **Cross-Platform IP Forwarding** | Auto-enables forwarding on both Linux (`/proc`) and Windows (PowerShell / netsh) |
+| 🎨 **Color-coded Output** | Clean, readable terminal output with Colorama |
+| ✅ **Input Validation** | All user-supplied IPs validated before use |
+
+---
+
+## 🔑 Credential Harvesting Pipeline
+
+Every captured packet runs through a multi-layer detection pipeline:
+
+| Layer | Protocol | What it catches | Example |
+|-------|----------|----------------|---------|
+| HTTP Form | HTTP POST | URL-encoded `username=admin&password=1234` | `[CREDS HTTP Form \| 192.168.1.5] User: admin \| Pass: 1234` |
+| JSON API | HTTP POST | `{"email":"a@b.com","password":"secret"}` | `[CREDS JSON API \| 192.168.1.5] Email: a@b.com \| Pass: secret` |
+| HTTP Basic | HTTP Header | `Authorization: Basic dXNlcjpwYXNz` | `[CREDS HTTP Basic \| 192.168.1.5] User: user \| Pass: pass` |
+| Bearer Token | HTTP Header | `Authorization: Bearer eyJhbG...` | `[CREDS Bearer Token \| 192.168.1.5] Token: eyJhbG...` |
+| FTP | TCP port 21 | `USER admin` / `PASS secret` | `[CREDS FTP \| 192.168.1.5] User: admin` |
+| SMTP | TCP port 25/587 | `AUTH LOGIN` / `AUTH PLAIN` | `[CREDS SMTP Auth \| 192.168.1.5] ...` |
+| POP3 | TCP port 110 | `USER` / `PASS` commands | `[CREDS POP3 \| 192.168.1.5] Pass: secret` |
+| IMAP | TCP port 143 | `LOGIN user pass` | `[CREDS IMAP \| 192.168.1.5] ...` |
+| Keyword Fallback | Any HTTP | Raw payload containing `username`, `password`, `email`, etc. | `[+] Possible credentials >>> ...` |
+
+> **Note:** HTTPS traffic is encrypted end-to-end — only plaintext HTTP, FTP, SMTP, POP3, and IMAP credentials can be captured.
 
 ---
 
 ## 🔧 Prerequisites
 
 ### Python Packages
-
-Install all Python dependencies with:
 
 ```bash
 pip install -r requirements.txt
@@ -128,10 +143,10 @@ Scapy needs a packet-capture driver on Windows. **Npcap** is the modern, support
 
 ### 🐧 Linux — Root Privileges
 
-Raw packet capture requires root on Linux:
+Raw packet capture and IP forwarding require root:
 
 ```bash
-sudo python main.py
+sudo python net_sniffer.py
 ```
 
 ---
@@ -160,44 +175,58 @@ pip install -r requirements.txt
 
 ## ▶️ Usage
 
-> **Important:** Run an ARP Spoofer first to redirect LAN traffic through your machine, otherwise you will only see your own traffic.
-
 ```bash
 # Linux / macOS
-sudo python main.py
+sudo python net_sniffer.py
 
 # Windows (run terminal as Administrator)
-python main.py
+python net_sniffer.py
 ```
 
-### Interactive Prompts
+### Main Menu
 
 ```
-Welcome To Packet Sniffer
-[***] Please Start ARP Spoofer Before Using this Module [***]
+  ███╗   ██╗███████╗████████╗    ███████╗███╗   ██╗██╗███████╗███████╗███████╗██████╗
+  ████╗  ██║██╔════╝╚══██╔══╝    ██╔════╝████╗  ██║██║██╔════╝██╔════╝██╔════╝██╔══██╗
+  ██╔██╗ ██║█████╗     ██║       ███████╗██╔██╗ ██║██║█████╗  █████╗  █████╗  ██████╔╝
+  ██║╚██╗██║██╔══╝     ██║       ╚════██║██║╚██╗██║██║██╔══╝  ██╔══╝  ██╔══╝  ██╔══██╗
+  ██║ ╚████║███████╗   ██║       ███████║██║ ╚████║██║██║     ██║     ███████╗██║  ██║
+  ╚═╝  ╚═══╝╚══════╝   ╚═╝       ╚══════╝╚═╝  ╚═══╝╚═╝╚═╝     ╚═╝     ╚══════╝╚═╝  ╚═╝
 
-[*] ARP spoofing is running in the background. Start packet sniffer now? (Y/N): Y
+=======================================================
+  [*] ARP Spoofing: inactive
+  [1]  Start ARP Spoofer  (MITM — poison ARP caches)
+  [2]  Start Packet Sniffer (capture HTTP credentials)
+  [3]  Stop ARP Spoofing   (restore ARP tables)
+  [4]  Exit
+=======================================================
+```
 
-[*] Do you want to print the raw Packet? (Y/N): Y
+### Typical Workflow
 
-+------------+-------------------+---------------+
-| Interface  |    Mac Address    |   IP Address  |
-+------------+-------------------+---------------+
-| eth0       | aa:bb:cc:dd:ee:ff | 192.168.1.5   |
-| lo         | 00:00:00:00:00:00 | 127.0.0.1     |
-+------------+-------------------+---------------+
+```
+1. Select [1] → Choose interface → Scan network → Pick victim (type R to rescan) → Pick gateway
+2. ARP spoofing starts in the background + IP forwarding enabled automatically
+3. Select [2] → Enter target IP (or blank for all) → Choose raw mode → Enter interface
+4. Sniffer captures DNS, HTTP, and credentials in real time
+5. Press Ctrl+C to stop sniffing → Select [3] to stop ARP spoofing → [4] to exit
+```
 
-[*] Please enter the interface name: eth0
-[*] Sniffing Packets...
+### Example Output
+
+```
+[DNS] 192.168.1.10 -> accounts.google.com
+[DNS] 192.168.1.10 -> example.com
 
 [+] HTTP REQUEST >>>>>
-192.168.1.10 just requested
- GET  example.com  /login
+  192.168.1.10 requested:
+  POST example.com/login
 
-[+] Username OR password is sent >>>>  username=admin&password=hunter2
+[CREDS HTTP Form | 192.168.1.10] User: admin | Email: admin@test.com | Pass: hunter2
+
+[CREDS FTP | 192.168.1.10] User: ftpuser
+[CREDS FTP | 192.168.1.10] Pass: ftppass123
 ```
-
-Press **`Ctrl + C`** at any time to stop sniffing.
 
 ---
 
@@ -206,8 +235,11 @@ Press **`Ctrl + C`** at any time to stop sniffing.
 ```
 NetworkSniffer/
 │
-├── main.py              # Core sniffer logic
-├── requirements.txt     # Python dependencies + Npcap note
+├── net_sniffer.py       # Main entry point — menu, sniffer, credential harvesting
+├── arp_spoof.py         # ARP spoofing module — MITM, IP forwarding, MAC resolution
+├── requirements.txt     # Python dependencies
+├── CHANGELOG.md         # Version history
+├── LICENSE              # MIT License
 └── README.md            # This file
 ```
 
@@ -216,32 +248,34 @@ NetworkSniffer/
 ## 🧩 How It Works
 
 ```
-1. Startup
-   └─ User selects interface from auto-detected list (via psutil)
+1. ARP Spoofing  [arp_spoof.py]
+   ├─ Resolve victim + gateway MACs via ARP broadcast
+   ├─ Enable IP forwarding (Linux: /proc  |  Windows: PowerShell/netsh)
+   ├─ Background thread sends spoofed ARP replies every 2s
+   └─ On stop: restore ARP tables + disable forwarding
 
-2. Sniffing Loop  [scapy_sniff]
-   └─ Every packet is passed to process_sniffed_packet()
-
-3. HTTP Filter
-   └─ Packets without an HTTPRequest layer are discarded
-
-4. For matching packets:
-   ├─ url_extractor()    → prints Source IP + Method + Host + Path
-   ├─ get_login_info()   → scans raw payload for credential keywords
-   └─ raw_http_request() → (optional) dumps all HTTP header fields
+2. Packet Sniffing  [net_sniffer.py]
+   ├─ scapy_sniff() with optional BPF filter (host <victim_ip>)
+   └─ Every packet → process_sniffed_packet():
+      ├─ DNS layer → log queried domain
+      ├─ HTTP layer → extract URL + harvest credentials
+      │   ├─ harvest_credentials() — form data, JSON, Basic/Bearer auth
+      │   ├─ get_login_info() — fallback keyword scan
+      │   └─ raw_http_request() — optional header dump
+      ├─ TCP Raw → harvest_plaintext_creds()
+      │   └─ FTP (21) | SMTP (25,587) | POP3 (110) | IMAP (143)
+      └─ TCP SYN → log new connections (raw mode only)
 ```
-
-> **Why HTTP only?** HTTPS traffic is encrypted end-to-end — only plaintext HTTP traffic can be inspected by this tool.
 
 ---
 
 ## 🖥️ Platform Support
 
-| Platform   | Capture Driver             | Privilege            | Status             |
-| ---------- | -------------------------- | -------------------- | ------------------ |
-| 🐧 Linux   | libpcap (built-in)         | `sudo` required      | ✅ Fully supported |
-| 🍎 macOS   | libpcap (built-in)         | `sudo` required      | ✅ Fully supported |
-| 🪟 Windows | Npcap (install separately) | Run as Administrator | ✅ Supported       |
+| Platform | Capture Driver | IP Forwarding | Privilege | Status |
+|----------|----------------|---------------|-----------|--------|
+| 🐧 Linux | libpcap (built-in) | `/proc/sys/net/ipv4/ip_forward` | `sudo` required | ✅ Fully supported |
+| 🍎 macOS | libpcap (built-in) | `sysctl` | `sudo` required | ✅ Fully supported |
+| 🪟 Windows | Npcap (install separately) | PowerShell / netsh | Run as Administrator | ✅ Supported |
 
 ---
 

